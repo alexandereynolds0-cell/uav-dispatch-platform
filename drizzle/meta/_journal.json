@@ -15,6 +15,13 @@
       "when": 1772163944647,
       "tag": "0001_sad_major_mapleleaf",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1772175374857,
+      "tag": "0002_blushing_mariko_yashida",
+      "breakpoints": true
     }
   ]
 }

@@ -385,6 +385,23 @@ export type RiskControl = typeof riskControls.$inferSelect;
 export type InsertRiskControl = typeof riskControls.$inferInsert;
 
 /**
+ * Login logs for security and audit
+ */
+export const loginLogs = mysqlTable("loginLogs", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  provider: varchar("provider", { length: 50 }).notNull(), // 'phone', 'wechat', 'alipay', 'google', 'email', 'manus'
+  ipAddress: varchar("ipAddress", { length: 45 }).notNull(),
+  userAgent: text("userAgent"),
+  success: boolean("success").default(true),
+  failureReason: text("failureReason"),
+  timestamp: timestamp("timestamp").defaultNow().notNull(),
+});
+
+export type LoginLog = typeof loginLogs.$inferSelect;
+export type InsertLoginLog = typeof loginLogs.$inferInsert;
+
+/**
  * System configuration
  */
 export const systemConfig = mysqlTable("systemConfig", {

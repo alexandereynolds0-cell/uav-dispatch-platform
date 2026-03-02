@@ -1,30 +1,30 @@
-import { protectedProcedure, router } from "../_core/trpc";
-import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { getDb, getTask, getTaskExecutionData } from "../db";
+import { router, publicProcedure, protectedProcedure, adminProcedure, requireRole } from "../_core/trpc";
+import { TRPCError } from "@trpc/server";
+import { db } from "../db";
 import {
   taskExecutionData,
   taskRatings,
   riskControls,
   systemConfig,
+  tasks,
+  pilotProfiles,
+  orders,
+  users,
+  notifications,
 } from "../../drizzle/schema";
-import { eq, and, desc } from "drizzle-orm";
-import { publicProcedure } from "../_core/trpc";
+import { eq, and, desc, asc, sql, count, gt, gte, lte, between } from "drizzle-orm";
+import { makeRequest, type LatLng } from "../_core/map";
 
-// Helper to ensure user has specific role
-function requireRole(allowedRoles: string[]) {
-  return protectedProcedure.use(({ ctx, next }) => {
-    if (!allowedRoles.includes(ctx.user.role)) {
-      throw new TRPCError({ code: "FORBIDDEN" });
-    }
-    return next({ ctx });
-  });
-}
-
+/**
+ * 数据路由 - 飞行数据、评分、风控、配置、地图、分析报表
+ */
 export const dataRouter = router({
-  // ========== Task Execution Data ==========
+  // ========== 飞行数据 ==========
 
-  // Upload flight data for a task
+  /**
+   * 上传飞行数据
+   */
   uploadFlightData: requireRole(["pilot"])
     .input(
       z.object({
@@ -33,82 +33,63 @@ export const dataRouter = router({
         flightDuration: z.number().optional(),
         actualArea: z.number().optional(),
         actualDistance: z.number().optional(),
-        flightPath: z.string().optional(), // GeoJSON
+        flightPath: z.string().optional(),
         photoUrls: z.array(z.string()).optional(),
+        photoCount: z.number().optional(),
+        arrivalTime: z.date().optional(),
+        departureTime: z.date().optional(),
+        completionTime: z.date().optional(),
         notes: z.string().optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const pilotProfile = await db.query.pilotProfiles.findFirst({
+        where: eq(pilotProfiles.userId, ctx.user.id),
+      });
 
-      // Verify task belongs to pilot
-      const task = await getTask(input.taskId);
-      if (!task) throw new TRPCError({ code: "NOT_FOUND" });
-      if (task.assignedPilotId !== ctx.user.id) {
-        throw new TRPCError({ code: "FORBIDDEN" });
+      if (!pilotProfile) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "飞手资料不存在" });
       }
 
-      // Check if execution data already exists
-      const existingData = await getTaskExecutionData(input.taskId);
+      const result = await db.insert(taskExecutionData).values({
+        taskId: input.taskId,
+        pilotId: pilotProfile.id,
+        flightLogUrl: input.flightLogUrl || null,
+        flightDuration: input.flightDuration || null,
+        actualArea: input.actualArea?.toString() || null,
+        actualDistance: input.actualDistance?.toString() || null,
+        flightPath: input.flightPath || null,
+        photoUrls: input.photoUrls ? JSON.stringify(input.photoUrls) : null,
+        photoCount: input.photoCount || 0,
+        arrivalTime: input.arrivalTime || null,
+        departureTime: input.departureTime || null,
+        completionTime: input.completionTime || null,
+        notes: input.notes || null,
+      });
 
-      if (existingData) {
-        // Update existing
-        await db
-          .update(taskExecutionData)
-          .set({
-            flightLogUrl: input.flightLogUrl,
-            flightDuration: input.flightDuration,
-            actualArea: input.actualArea?.toString(),
-            actualDistance: input.actualDistance?.toString(),
-            flightPath: input.flightPath,
-            photoUrls: input.photoUrls ? JSON.stringify(input.photoUrls) : undefined,
-            photoCount: input.photoUrls?.length || 0,
-            notes: input.notes,
-            updatedAt: new Date(),
-          })
-          .where(eq(taskExecutionData.taskId, input.taskId));
-      } else {
-        // Create new
-        await db.insert(taskExecutionData).values({
-          taskId: input.taskId,
-          pilotId: ctx.user.id,
-          flightLogUrl: input.flightLogUrl,
-          flightDuration: input.flightDuration,
-          actualArea: input.actualArea?.toString(),
-          actualDistance: input.actualDistance?.toString(),
-          flightPath: input.flightPath,
-          photoUrls: input.photoUrls ? JSON.stringify(input.photoUrls) : undefined,
-          photoCount: input.photoUrls?.length || 0,
-          notes: input.notes,
-        });
-      }
-
-      return { success: true };
+      return { success: true, id: result[0].insertId };
     }),
 
-  // Get execution data for a task
+  /**
+   * 获取任务执行数据
+   */
   getExecutionData: protectedProcedure
     .input(z.object({ taskId: z.number() }))
     .query(async ({ ctx, input }) => {
-      const task = await getTask(input.taskId);
-      if (!task) throw new TRPCError({ code: "NOT_FOUND" });
+      const [data] = await db
+        .select()
+        .from(taskExecutionData)
+        .where(eq(taskExecutionData.taskId, input.taskId))
+        .limit(1);
 
-      // Verify permission
-      if (
-        ctx.user.role !== "admin" &&
-        task.customerId !== ctx.user.id &&
-        task.assignedPilotId !== ctx.user.id
-      ) {
-        throw new TRPCError({ code: "FORBIDDEN" });
-      }
-
-      return await getTaskExecutionData(input.taskId);
+      return data || null;
     }),
 
-  // ========== Task Ratings ==========
+  // ========== 评分 ==========
 
-  // Create or update task rating
+  /**
+   * 评价任务
+   */
   rateTask: requireRole(["customer"])
     .input(
       z.object({
@@ -121,66 +102,97 @@ export const dataRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const [task] = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, input.taskId))
+        .limit(1);
 
-      // Verify task belongs to customer
-      const task = await getTask(input.taskId);
-      if (!task) throw new TRPCError({ code: "NOT_FOUND" });
-      if (task.customerId !== ctx.user.id) {
-        throw new TRPCError({ code: "FORBIDDEN" });
+      if (!task || task.customerId !== ctx.user.id) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "无权评价此任务" });
       }
 
       if (!task.assignedPilotId) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "Task has no assigned pilot",
-        });
+        throw new TRPCError({ code: "BAD_REQUEST", message: "任务未分配飞手" });
       }
 
-      // Check if rating already exists
-      const existingRating = await getTaskRating(input.taskId);
+      // 检查是否已评价
+      const [existing] = await db
+        .select()
+        .from(taskRatings)
+        .where(eq(taskRatings.taskId, input.taskId))
+        .limit(1);
 
-      if (existingRating) {
-        // Update existing
+      if (existing) {
+        // 更新评价
         await db
           .update(taskRatings)
           .set({
             rating: input.rating,
-            comment: input.comment,
-            qualityScore: input.qualityScore,
-            timelinessScore: input.timelinessScore,
-            communicationScore: input.communicationScore,
+            comment: input.comment || null,
+            qualityScore: input.qualityScore || null,
+            timelinessScore: input.timelinessScore || null,
+            communicationScore: input.communicationScore || null,
             updatedAt: new Date(),
           })
-          .where(eq(taskRatings.taskId, input.taskId));
+          .where(eq(taskRatings.id, existing.id));
       } else {
-        // Create new
+        // 创建评价
         await db.insert(taskRatings).values({
           taskId: input.taskId,
           customerId: ctx.user.id,
           pilotId: task.assignedPilotId,
           rating: input.rating,
-          comment: input.comment,
-          qualityScore: input.qualityScore,
-          timelinessScore: input.timelinessScore,
-          communicationScore: input.communicationScore,
+          comment: input.comment || null,
+          qualityScore: input.qualityScore || null,
+          timelinessScore: input.timelinessScore || null,
+          communicationScore: input.communicationScore || null,
         });
+      }
+
+      // 更新飞手评分
+      const ratings = await db
+        .select({ rating: taskRatings.rating })
+        .from(taskRatings)
+        .where(eq(taskRatings.pilotId, task.assignedPilotId));
+
+      if (ratings.length > 0) {
+        const avgRating =
+          ratings.reduce((sum, r) => sum + Number(r.rating), 0) /
+          ratings.length;
+        await db
+          .update(pilotProfiles)
+          .set({
+            averageRating: avgRating.toFixed(2),
+            totalScore: (avgRating * ratings.length).toFixed(2),
+            updatedAt: new Date(),
+          })
+          .where(eq(pilotProfiles.id, task.assignedPilotId));
       }
 
       return { success: true };
     }),
 
-  // Get task rating
+  /**
+   * 获取任务评价
+   */
   getRating: publicProcedure
     .input(z.object({ taskId: z.number() }))
     .query(async ({ input }) => {
-      return await getTaskRating(input.taskId);
+      const [rating] = await db
+        .select()
+        .from(taskRatings)
+        .where(eq(taskRatings.taskId, input.taskId))
+        .limit(1);
+
+      return rating || null;
     }),
 
-  // ========== Risk Control ==========
+  // ========== 风控 ==========
 
-  // Create risk control record (admin)
+  /**
+   * 创建风控记录
+   */
   createRiskControl: requireRole(["admin"])
     .input(
       z.object({
@@ -192,38 +204,38 @@ export const dataRouter = router({
           "payment_default",
           "complaint",
         ]),
-        severity: z.enum(["low", "medium", "high", "critical"]).default("medium"),
+        severity: z.enum(["low", "medium", "high", "critical"]).default(
+          "medium"
+        ),
         description: z.string(),
         evidence: z.any().optional(),
-        action: z.enum(["warning", "suspension", "blacklist"]).default("warning"),
-        actionDuration: z.number().optional(), // days
+        action: z
+          .enum(["warning", "suspension", "blacklist"])
+          .default("warning"),
+        actionDuration: z.number().optional(),
       })
     )
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-
+    .mutation(async ({ input }) => {
       const result = await db.insert(riskControls).values({
         userId: input.userId,
         riskType: input.riskType,
         severity: input.severity,
         description: input.description,
-        evidence: input.evidence ? JSON.stringify(input.evidence) : undefined,
-        action: input.action,
-        actionDuration: input.actionDuration,
+        evidence: input.evidence ? JSON.stringify(input.evidence) : null,
         status: "active",
+        action: input.action,
+        actionDuration: input.actionDuration || null,
       });
 
-      return { riskControlId: result[0].insertId };
+      return { success: true, id: result[0].insertId };
     }),
 
-  // Get user risk controls (admin)
+  /**
+   * 获取用户风控记录
+   */
   getUserRiskControls: requireRole(["admin"])
     .input(z.object({ userId: z.number() }))
-    .query(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) return [];
-
+    .query(async ({ input }) => {
       return await db
         .select()
         .from(riskControls)
@@ -231,24 +243,23 @@ export const dataRouter = router({
         .orderBy(desc(riskControls.createdAt));
     }),
 
-  // Resolve risk control (admin)
+  /**
+   * 解决风控记录
+   */
   resolveRiskControl: requireRole(["admin"])
     .input(
       z.object({
         riskControlId: z.number(),
-        resolution: z.string().optional(),
+        resolution: z.string(),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-
       await db
         .update(riskControls)
         .set({
           status: "resolved",
-          resolvedAt: new Date(),
           resolvedBy: ctx.user.id,
+          resolvedAt: new Date(),
           updatedAt: new Date(),
         })
         .where(eq(riskControls.id, input.riskControlId));
@@ -256,33 +267,33 @@ export const dataRouter = router({
       return { success: true };
     }),
 
-  // ========== System Configuration ==========
+  // ========== 配置 ==========
 
-  // Get system config value
+  /**
+   * 获取配置
+   */
   getConfig: publicProcedure
     .input(z.object({ key: z.string() }))
     .query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-
-      const result = await db
+      const [config] = await db
         .select()
         .from(systemConfig)
         .where(eq(systemConfig.key, input.key))
         .limit(1);
 
-      return result.length > 0 ? result[0] : null;
+      return config || null;
     }),
 
-  // Get all system configs (admin)
+  /**
+   * 获取所有配置
+   */
   getAllConfigs: requireRole(["admin"]).query(async () => {
-    const db = await getDb();
-    if (!db) return [];
-
     return await db.select().from(systemConfig);
   }),
 
-  // Update system config (admin)
+  /**
+   * 更新配置
+   */
   updateConfig: requireRole(["admin"])
     .input(
       z.object({
@@ -291,50 +302,509 @@ export const dataRouter = router({
         description: z.string().optional(),
       })
     )
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-
-      // Check if config exists
-      const existing = await db
+    .mutation(async ({ input }) => {
+      const [existing] = await db
         .select()
         .from(systemConfig)
         .where(eq(systemConfig.key, input.key))
         .limit(1);
 
-      if (existing.length > 0) {
-        // Update
+      if (existing) {
         await db
           .update(systemConfig)
           .set({
             value: input.value,
-            description: input.description,
+            description: input.description || existing.description,
             updatedAt: new Date(),
           })
-          .where(eq(systemConfig.key, input.key));
+          .where(eq(systemConfig.id, existing.id));
       } else {
-        // Create
         await db.insert(systemConfig).values({
           key: input.key,
           value: input.value,
-          description: input.description,
+          description: input.description || null,
         });
       }
 
       return { success: true };
     }),
+
+  // ========== 地图功能 ==========
+
+  /**
+   * 地址转坐标（地理编码）
+   */
+  geocode: publicProcedure
+    .input(z.object({ address: z.string() }))
+    .query(async ({ input }) => {
+      try {
+        const result = await makeRequest<any>("/maps/api/geocode/json", {
+          address: input.address,
+        });
+
+        if (result.results && result.results.length > 0) {
+          const location = result.results[0].geometry.location;
+          return {
+            lat: location.lat,
+            lng: location.lng,
+            formattedAddress: result.results[0].formatted_address,
+          };
+        }
+        return null;
+      } catch (error) {
+        console.error("[Map] Geocode failed:", error);
+        return null;
+      }
+    }),
+
+  /**
+   * 坐标转地址（逆地理编码）
+   */
+  reverseGeocode: publicProcedure
+    .input(z.object({ lat: z.number(), lng: z.number() }))
+    .query(async ({ input }) => {
+      try {
+        const result = await makeRequest<any>("/maps/api/geocode/json", {
+          latlng: `${input.lat},${input.lng}`,
+        });
+
+        if (result.results && result.results.length > 0) {
+          return {
+            formattedAddress: result.results[0].formatted_address,
+            placeId: result.results[0].place_id,
+          };
+        }
+        return null;
+      } catch (error) {
+        console.error("[Map] Reverse geocode failed:", error);
+        return null;
+      }
+    }),
+
+  /**
+   * 计算两点间距离
+   */
+  calculateDistance: publicProcedure
+    .input(
+      z.object({
+        origins: z.array(
+          z.object({
+            lat: z.number(),
+            lng: z.number(),
+          })
+        ),
+        destinations: z.array(
+          z.object({
+            lat: z.number(),
+            lng: z.number(),
+          })
+        ),
+        mode: z.enum(["driving", "walking", "bicycling"]).default(
+          "driving"
+        ),
+      })
+    )
+    .query(async ({ input }) => {
+      try {
+        const origins = input.origins
+          .map((o) => `${o.lat},${o.lng}`)
+          .join("|");
+        const destinations = input.destinations
+          .map((d) => `${d.lat},${d.lng}`)
+          .join("|");
+
+        const result = await makeRequest<any>(
+          "/maps/api/distancematrix/json",
+          {
+            origins,
+            destinations,
+            mode: input.mode,
+            units: "metric",
+          }
+        );
+
+        return result.rows.map((row: any) => ({
+          elements: row.elements.map((element: any) => ({
+            distance: element.distance?.text,
+            distanceValue: element.distance?.value,
+            duration: element.duration?.text,
+            durationValue: element.duration?.value,
+          })),
+        }));
+      } catch (error) {
+        console.error("[Map] Distance calculation failed:", error);
+        return null;
+      }
+    }),
+
+  /**
+   * 路径规划
+   */
+  getDirections: publicProcedure
+    .input(
+      z.object({
+        origin: z.object({
+          lat: z.number(),
+          lng: z.number(),
+        }),
+        destination: z.object({
+          lat: z.number(),
+          lng: z.number(),
+        }),
+        mode: z.enum(["driving", "walking", "bicycling"]).default(
+          "driving"
+        ),
+      })
+    )
+    .query(async ({ input }) => {
+      try {
+        const result = await makeRequest<any>("/maps/api/directions/json", {
+          origin: `${input.origin.lat},${input.origin.lng}`,
+          destination: `${input.destination.lat},${input.destination.lng}`,
+          mode: input.mode,
+        });
+
+        if (result.routes && result.routes.length > 0) {
+          const route = result.routes[0];
+          return {
+            overviewPolyline: route.overview_polyline.points,
+            bounds: route.bounds,
+            legs: route.legs.map((leg: any) => ({
+              distance: leg.distance?.text,
+              distanceValue: leg.distance?.value,
+              duration: leg.duration?.text,
+              durationValue: leg.duration?.value,
+              startAddress: leg.start_address,
+              endAddress: leg.end_address,
+              steps: leg.steps.map((step: any) => ({
+                distance: step.distance?.text,
+                duration: step.duration?.text,
+                htmlInstructions: step.html_instructions,
+                polyline: step.polyline.points,
+              })),
+            })),
+          };
+        }
+        return null;
+      } catch (error) {
+        console.error("[Map] Directions failed:", error);
+        return null;
+      }
+    }),
+
+  /**
+   * 搜索附近地点
+   */
+  nearbySearch: publicProcedure
+    .input(
+      z.object({
+        location: z.object({
+          lat: z.number(),
+          lng: z.number(),
+        }),
+        radius: z.number().default(5000),
+        keyword: z.string().optional(),
+        type: z.string().optional(),
+      })
+    )
+    .query(async ({ input }) => {
+      try {
+        const result = await makeRequest<any>(
+          "/maps/api/place/nearbysearch/json",
+          {
+            location: `${input.location.lat},${input.location.lng}`,
+            radius: input.radius,
+            keyword: input.keyword,
+            type: input.type,
+          }
+        );
+
+        return result.results.map((place: any) => ({
+          name: place.name,
+          placeId: place.place_id,
+          location: place.geometry?.location,
+          address: place.vicinity,
+          rating: place.rating,
+          types: place.types,
+        }));
+      } catch (error) {
+        console.error("[Map] Nearby search failed:", error);
+        return [];
+      }
+    }),
+
+  // ========== 数据分析报表 ==========
+
+  /**
+   * 获取订单统计报表
+   */
+  getOrderReport: adminProcedure
+    .input(
+      z.object({
+        startDate: z.date().optional(),
+        endDate: z.date().optional(),
+        groupBy: z.enum(["day", "week", "month"]).default("day"),
+      })
+    )
+    .query(async ({ input }) => {
+      const { startDate, endDate, groupBy } = input;
+
+      // 构建日期格式
+      const dateFormat = {
+        day: "%Y-%m-%d",
+        week: "%Y-W%V",
+        month: "%Y-%m",
+      }[groupBy];
+
+      // 查询订单统计
+      const orderStats = await db
+        .select({
+          date: sql<string>`DATE_FORMAT(${orders.createdAt}, '${dateFormat}')`,
+          count: count(),
+          totalAmount: sql<number>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+          platformFee: sql<number>`COALESCE(SUM(${orders.platformFee}), 0)`,
+        })
+        .from(orders)
+        .groupBy(sql`DATE_FORMAT(${orders.createdAt}, '${dateFormat}')`)
+        .orderBy(sql`DATE_FORMAT(${orders.createdAt}, '${dateFormat}')`);
+
+      // 如果有日期范围，过滤结果
+      let filteredStats = orderStats;
+      if (startDate && endDate) {
+        filteredStats = orderStats.filter((stat) => {
+          const statDate = new Date(stat.date);
+          return statDate >= startDate && statDate <= endDate;
+        });
+      }
+
+      return filteredStats;
+    }),
+
+  /**
+   * 获取任务统计报表
+   */
+  getTaskReport: adminProcedure
+    .input(
+      z.object({
+        startDate: z.date().optional(),
+        endDate: z.date().optional(),
+        taskType: z.enum(["spray", "transport"]).optional(),
+        groupBy: z.enum(["day", "week", "month"]).default("day"),
+      })
+    )
+    .query(async ({ input }) => {
+      const { startDate, endDate, taskType, groupBy } = input;
+
+      const dateFormat = {
+        day: "%Y-%m-%d",
+        week: "%Y-W%V",
+        month: "%Y-%m",
+      }[groupBy];
+
+      // 构建查询条件
+      const conditions = [];
+      if (taskType) {
+        conditions.push(eq(tasks.taskType, taskType));
+      }
+
+      const taskStats = await db
+        .select({
+          date: sql<string>`DATE_FORMAT(${tasks.createdAt}, '${dateFormat}')`,
+          taskType: tasks.taskType,
+          count: count(),
+        })
+        .from(tasks)
+        .where(conditions.length > 0 ? and(...conditions) : undefined)
+        .groupBy(sql`DATE_FORMAT(${tasks.createdAt}, '${dateFormat}'), ${tasks.taskType}`)
+        .orderBy(sql`DATE_FORMAT(${tasks.createdAt}, '${dateFormat}')`);
+
+      return taskStats;
+    }),
+
+  /**
+   * 获取飞手绩效报表
+   */
+  getPilotPerformanceReport: adminProcedure
+    .input(
+      z.object({
+        startDate: z.date().optional(),
+        endDate: z.date().optional(),
+        limit: z.number().default(50),
+      })
+    )
+    .query(async ({ input }) => {
+      const { startDate, endDate, limit } = input;
+
+      // 获取飞手基本信息和统计数据
+      const pilotStats = await db
+        .select({
+          id: pilotProfiles.id,
+          realName: pilotProfiles.realName,
+          level: pilotProfiles.level,
+          totalTasks: pilotProfiles.totalTasks,
+          completedTasks: pilotProfiles.completedTasks,
+          fulfillmentRate: pilotProfiles.fulfillmentRate,
+          averageRating: pilotProfiles.averageRating,
+        })
+        .from(pilotProfiles)
+        .orderBy(desc(pilotProfiles.completedTasks))
+        .limit(limit);
+
+      // 获取每个飞手的收入
+      const pilotEarnings = await db
+        .select({
+          pilotId: orders.pilotId,
+          totalEarnings: sql<number>`COALESCE(SUM(${orders.totalAmount} - ${orders.platformFee}), 0)`,
+          orderCount: count(),
+        })
+        .from(orders)
+        .where(
+          and(
+            orders.pilotId.isNotNull(),
+            startDate ? gte(orders.createdAt, startDate) : undefined,
+            endDate ? lte(orders.createdAt, endDate) : undefined
+          )
+        )
+        .groupBy(orders.pilotId);
+
+      // 合并数据
+      return pilotStats.map((pilot) => {
+        const earnings = pilotEarnings.find(
+          (e) => e.pilotId === pilot.id
+        );
+        return {
+          ...pilot,
+          totalEarnings: earnings?.totalEarnings || 0,
+          orderCount: earnings?.orderCount || 0,
+        };
+      });
+    }),
+
+  /**
+   * 获取客户统计报表
+   */
+  getCustomerReport: adminProcedure
+    .input(
+      z.object({
+        startDate: z.date().optional(),
+        endDate: z.date().optional(),
+        limit: z.number().default(50),
+      })
+    )
+    .query(async ({ input }) => {
+      const { startDate, endDate, limit } = input;
+
+      // 获取客户任务统计
+      const customerStats = await db
+        .select({
+          customerId: tasks.customerId,
+          taskCount: count(),
+        })
+        .from(tasks)
+        .groupBy(tasks.customerId)
+        .orderBy(sql`COUNT(*)`)
+        .limit(limit);
+
+      // 获取客户信息和消费统计
+      const result = await Promise.all(
+        customerStats.map(async (stat) => {
+          const [user] = await db
+            .select()
+            .from(users)
+            .where(eq(users.id, stat.customerId))
+            .limit(1);
+
+          const spending = await db
+            .select({
+              totalSpent: sql<number>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+            })
+            .from(orders)
+            .where(eq(orders.customerId, stat.customerId));
+
+          return {
+            customerId: stat.customerId,
+            customerName: user?.name,
+            customerPhone: user?.phone,
+            taskCount: stat.taskCount,
+            totalSpent: spending[0]?.totalSpent || 0,
+          };
+        })
+      );
+
+      return result;
+    }),
+
+  /**
+   * 获取运营概况
+   */
+  getOverview: adminProcedure.query(async () => {
+    // 今日数据
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const [todayOrders] = await db
+      .select({
+        count: count(),
+        amount: sql<number>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+      })
+      .from(orders)
+      .where(gte(orders.createdAt, today));
+
+    const [todayTasks] = await db
+      .select({
+        count: count(),
+      })
+      .from(tasks)
+      .where(
+        and(
+          gte(tasks.createdAt, today),
+          eq(tasks.status, "completed")
+        )
+      );
+
+    // 本月数据
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [monthOrders] = await db
+      .select({
+        count: count(),
+        amount: sql<number>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+        platformFee: sql<number>`COALESCE(SUM(${orders.platformFee}), 0)`,
+      })
+      .from(orders)
+      .where(gte(orders.createdAt, monthStart));
+
+    // 总计数据
+    const [totalStats] = await db
+      .select({
+        totalUsers: sql<number>`COUNT(DISTINCT ${users.id})`,
+        totalPilots: sql<number>`COUNT(DISTINCT ${pilotProfiles.id})`,
+        totalTasks: sql<number>`COUNT(DISTINCT ${tasks.id})`,
+        completedTasks: sql<number>`COUNT(DISTINCT CASE WHEN ${tasks.status} = 'completed' THEN ${tasks.id} END)`,
+      })
+      .from(users)
+      .leftJoin(pilotProfiles, eq(users.id, pilotProfiles.userId))
+      .leftJoin(tasks, eq(users.id, tasks.customerId));
+
+    return {
+      today: {
+        orderCount: todayOrders?.count || 0,
+        orderAmount: todayOrders?.amount || 0,
+        completedTasks: todayTasks?.count || 0,
+      },
+      month: {
+        orderCount: monthOrders?.count || 0,
+        orderAmount: monthOrders?.amount || 0,
+        platformFee: monthOrders?.platformFee || 0,
+      },
+      total: {
+        users: totalStats?.totalUsers || 0,
+        pilots: totalStats?.totalPilots || 0,
+        tasks: totalStats?.totalTasks || 0,
+        completedTasks: totalStats?.completedTasks || 0,
+      },
+    };
+  }),
 });
-
-// Helper function
-async function getTaskRating(taskId: number) {
-  const db = await getDb();
-  if (!db) return null;
-
-  const result = await db
-    .select()
-    .from(taskRatings)
-    .where(eq(taskRatings.taskId, taskId))
-    .limit(1);
-
-  return result.length > 0 ? result[0] : null;
-}

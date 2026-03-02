@@ -9,6 +9,7 @@ import { adminRouter } from "./routers/adminRouter";
 import { chatRouter } from "./routers/chatRouter";
 import { configRouter } from "./routers/configRouter";
 import { contactRouter } from "./routers/contactRouter";
+import { notificationRouter } from "./routers/notificationRouter";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
@@ -76,6 +77,8 @@ export const appRouter = router({
   config: configRouter,
   // 联系解锁路由 - 付费获取飞手联系方式
   contact: contactRouter,
+  // 通知路由 - 用户通知管理
+  notification: notificationRouter,
 
   // ========== User Management Routes ==========
   user: router({
@@ -450,7 +453,7 @@ export const appRouter = router({
       }),
   }),
 
-  // ========== Notification Routes ==========
+  // ========== Notification Routes (保留兼容性) ==========
   notification: router({
     // Get user notifications
     getNotifications: protectedProcedure

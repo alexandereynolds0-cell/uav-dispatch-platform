@@ -10,6 +10,7 @@ import { chatRouter } from "./routers/chatRouter";
 import { configRouter } from "./routers/configRouter";
 import { contactRouter } from "./routers/contactRouter";
 import { notificationRouter } from "./routers/notificationRouter";
+import { noFlyZoneRouter } from "./routers/noFlyZoneRouter";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
@@ -44,6 +45,7 @@ import {
   pilotSettlements,
   notifications,
   riskControls,
+  systemConfig,
 } from "../drizzle/schema";
 import {
   getCandidatePilots,
@@ -63,6 +65,69 @@ function requireRole(allowedRoles: string[]) {
   });
 }
 
+// 检查坐标是否在禁飞区内
+async function checkNoFlyZone(lat: number, lng: number) {
+  const zonesJson = await getDb()
+    .select()
+    .from(systemConfig)
+    .where(eq(systemConfig.key, "no_fly_zones"))
+    .limit(1);
+
+  if (zonesJson.length === 0 || !zonesJson[0].value) {
+    return { inZone: false, zones: [] };
+  }
+
+  let zones: any[] = [];
+  try {
+    zones = JSON.parse(zonesJson[0].value);
+  } catch {
+    zones = [];
+  }
+
+  const enabledZones = zones.filter((z: any) => z.enabled);
+
+  const inZones = enabledZones.filter((zone: any) => {
+    if (zone.type === "polygon") {
+      return isPointInPolygon([lng, lat], zone.coordinates);
+    } else if (zone.type === "circle" && zone.center && zone.radius) {
+      return isPointInCircle([lng, lat], [zone.center.lng, zone.center.lat], zone.radius);
+    }
+    return false;
+  });
+
+  return {
+    inZone: inZones.length > 0,
+    zones: inZones.map((z: any) => ({
+      id: z.id,
+      name: z.name,
+      riskLevel: z.riskLevel,
+      description: z.description,
+    })),
+  };
+}
+
+// 射线法判断点在多边形内
+function isPointInPolygon(point: number[], polygon: number[][]): boolean {
+  const [x, y] = point;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i];
+    const [xj, yj] = polygon[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// 判断点在圆内
+function isPointInCircle(point: number[], center: number[], radius: number): boolean {
+  const [x1, y1] = point;
+  const [x2, y2] = center;
+  const distance = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+  return distance <= radius / 111000; // 近似转换
+}
+
 export const appRouter = router({
   system: systemRouter,
   payment: paymentRouter,
@@ -79,10 +144,11 @@ export const appRouter = router({
   contact: contactRouter,
   // 通知路由 - 用户通知管理
   notification: notificationRouter,
+  // 禁飞区路由 - 地图区域管理
+  noFlyZone: noFlyZoneRouter,
 
   // ========== User Management Routes ==========
   user: router({
-    // Get current user profile
     profile: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -95,7 +161,6 @@ export const appRouter = router({
         throw new TRPCError({ code: "NOT_FOUND" });
       }
       const user = userResult[0];
-      // Get role-specific profile
       let roleProfile = null;
       if (user.role === "customer") {
         roleProfile = await getCustomerProfile(user.id);
@@ -104,7 +169,6 @@ export const appRouter = router({
       }
       return { user, roleProfile };
     }),
-    // Update user profile
     updateProfile: protectedProcedure
       .input(
         z.object({
@@ -131,11 +195,9 @@ export const appRouter = router({
 
   // ========== Customer Routes ==========
   customer: router({
-    // Get customer profile
     getProfile: requireRole(["customer"]).query(async ({ ctx }) => {
       return await getCustomerProfile(ctx.user.id);
     }),
-    // Update customer profile
     updateProfile: requireRole(["customer"])
       .input(
         z.object({
@@ -164,11 +226,9 @@ export const appRouter = router({
           .where(eq(customerProfiles.userId, ctx.user.id));
         return { success: true };
       }),
-    // Get customer's tasks
     getTasks: requireRole(["customer"]).query(async ({ ctx }) => {
       return await getTasksByCustomer(ctx.user.id);
     }),
-    // Get customer's orders
     getOrders: requireRole(["customer"]).query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
@@ -182,11 +242,9 @@ export const appRouter = router({
 
   // ========== Pilot Routes ==========
   pilot: router({
-    // Get pilot profile
     getProfile: requireRole(["pilot"]).query(async ({ ctx }) => {
       return await getPilotProfile(ctx.user.id);
     }),
-    // Update pilot profile
     updateProfile: requireRole(["pilot"])
       .input(
         z.object({
@@ -219,23 +277,16 @@ export const appRouter = router({
           .where(eq(pilotProfiles.userId, ctx.user.id));
         return { success: true };
       }),
-    // Get available tasks for pilot
     getAvailableTasks: requireRole(["pilot"]).query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
       const pilot = await getPilotProfile(ctx.user.id);
       if (!pilot) return [];
-      // Get tasks that are in pushing state
-      return await db
-        .select()
-        .from(tasks)
-        .where(eq(tasks.status, "pushing"));
+      return await db.select().from(tasks).where(eq(tasks.status, "pushing"));
     }),
-    // Get pilot's assigned tasks
     getAssignedTasks: requireRole(["pilot"]).query(async ({ ctx }) => {
       return await getTasksByPilot(ctx.user.id);
     }),
-    // Accept a task
     acceptTask: requireRole(["pilot"])
       .input(z.object({ taskId: z.number() }))
       .mutation(async ({ ctx, input }) => {
@@ -243,14 +294,9 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const task = await getTask(input.taskId);
         if (!task) throw new TRPCError({ code: "NOT_FOUND" });
-        // Check if task is still available
         if (task.status !== "pushing") {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "Task is no longer available",
-          });
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Task is no longer available" });
         }
-        // Update task assignment
         await db
           .update(tasks)
           .set({
@@ -260,7 +306,6 @@ export const appRouter = router({
             updatedAt: new Date(),
           })
           .where(eq(tasks.id, input.taskId));
-        // Update push history
         await db
           .update(taskPushHistory)
           .set({
@@ -268,37 +313,20 @@ export const appRouter = router({
             responseTime: new Date(),
             responseType: "accept",
           })
-          .where(
-            and(
-              eq(taskPushHistory.taskId, input.taskId),
-              eq(taskPushHistory.pilotId, ctx.user.id)
-            )
-          );
+          .where(and(eq(taskPushHistory.taskId, input.taskId), eq(taskPushHistory.pilotId, ctx.user.id)));
         return { success: true };
       }),
-    // Reject a task
     rejectTask: requireRole(["pilot"])
       .input(z.object({ taskId: z.number() }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        // Update push history
         await db
           .update(taskPushHistory)
-          .set({
-            status: "rejected",
-            responseTime: new Date(),
-            responseType: "reject",
-          })
-          .where(
-            and(
-              eq(taskPushHistory.taskId, input.taskId),
-              eq(taskPushHistory.pilotId, ctx.user.id)
-            )
-          );
+          .set({ status: "rejected", responseTime: new Date(), responseType: "reject" })
+          .where(and(eq(taskPushHistory.taskId, input.taskId), eq(taskPushHistory.pilotId, ctx.user.id)));
         return { success: true };
       }),
-    // Get pilot's ratings
     getRatings: requireRole(["pilot"]).query(async ({ ctx }) => {
       return await getPilotRatings(ctx.user.id);
     }),
@@ -306,13 +334,12 @@ export const appRouter = router({
 
   // ========== Task Routes ==========
   task: router({
-    // Get task details
     getTask: publicProcedure
       .input(z.object({ taskId: z.number() }))
       .query(async ({ input }) => {
         return await getTask(input.taskId);
       }),
-    // Create new task (customer only)
+    // 创建任务时检查禁飞区
     create: requireRole(["customer"])
       .input(
         z.object({
@@ -331,11 +358,46 @@ export const appRouter = router({
           scheduledEndDate: z.date().optional(),
           timeWindow: z.string().optional(),
           budgetAmount: z.number(),
+          forceCreate: z.boolean().default(false), // 强制在禁飞区创建
         })
       )
       .mutation(async ({ ctx, input }) => {
+        // 检查禁飞区
+        const noFlyCheck = await checkNoFlyZone(input.latitude, input.longitude);
+        
+        // 获取设置
+        const settingsJson = await getDb()
+          .select()
+          .from(systemConfig)
+          .where(eq(systemConfig.key, "no_fly_zone_settings"))
+          .limit(1);
+        
+        let settings = {
+          allowInZone: false,
+          showWarning: true,
+        };
+        if (settingsJson.length > 0 && settingsJson[0].value) {
+          try {
+            settings = JSON.parse(settingsJson[0].value);
+          } catch {}
+        }
+        
+        // 如果在禁飞区内且不允许创建，返回警告
+        if (noFlyCheck.inZone && !settings.allowInZone && !input.forceCreate) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "当前位置位于禁飞区内",
+            data: {
+              noFlyWarning: true,
+              zones: noFlyCheck.zones,
+              canForceCreate: settings.allowInZone,
+            },
+          });
+        }
+        
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        
         const result = await db.insert(tasks).values({
           customerId: ctx.user.id,
           taskType: input.taskType,
@@ -355,15 +417,17 @@ export const appRouter = router({
           budgetAmount: input.budgetAmount.toString(),
           status: "draft",
         });
-        return { taskId: result[0].insertId };
+        
+        return { 
+          taskId: result[0].insertId,
+          noFlyWarning: noFlyCheck.inZone ? noFlyCheck.zones : null
+        };
       }),
-    // Get tasks by status (admin)
     getByStatus: requireRole(["admin"])
       .input(z.object({ status: z.string() }))
       .query(async ({ input }) => {
         return await getTasksByStatus(input.status);
       }),
-    // Approve task (admin)
     approve: requireRole(["admin"])
       .input(z.object({ taskId: z.number() }))
       .mutation(async ({ input }) => {
@@ -371,17 +435,12 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const task = await getTask(input.taskId);
         if (!task) throw new TRPCError({ code: "NOT_FOUND" });
-        // Update task status
         await db
           .update(tasks)
-          .set({
-            status: "approved",
-            updatedAt: new Date(),
-          })
+          .set({ status: "approved", updatedAt: new Date() })
           .where(eq(tasks.id, input.taskId));
         return { success: true };
       }),
-    // Start task dispatch (admin)
     startDispatch: requireRole(["admin"])
       .input(z.object({ taskId: z.number() }))
       .mutation(async ({ input }) => {
@@ -389,15 +448,10 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const task = await getTask(input.taskId);
         if (!task) throw new TRPCError({ code: "NOT_FOUND" });
-        // Get candidate pilots
         const candidates = await getCandidatePilots(task.taskType);
         if (candidates.length === 0) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "No available pilots for this task",
-          });
+          throw new TRPCError({ code: "BAD_REQUEST", message: "No available pilots for this task" });
         }
-        // Rank pilots
         const rankedPilots = await rankPilots(
           candidates,
           input.taskId,
@@ -407,9 +461,7 @@ export const appRouter = router({
           task.area ? parseFloat(task.area.toString()) : null,
           task.weight ? parseFloat(task.weight.toString()) : null
         );
-        // Batch push
         await batchPushTask(input.taskId, rankedPilots);
-        // Update task status
         await db
           .update(tasks)
           .set({
@@ -421,7 +473,6 @@ export const appRouter = router({
           .where(eq(tasks.id, input.taskId));
         return { success: true, pilotCount: rankedPilots.length };
       }),
-    // Update task status
     updateStatus: protectedProcedure
       .input(
         z.object({
@@ -434,34 +485,24 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const task = await getTask(input.taskId);
         if (!task) throw new TRPCError({ code: "NOT_FOUND" });
-        // Verify permission
-        if (
-          ctx.user.role !== "admin" &&
-          task.customerId !== ctx.user.id &&
-          task.assignedPilotId !== ctx.user.id
-        ) {
+        if (ctx.user.role !== "admin" && task.customerId !== ctx.user.id && task.assignedPilotId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
         await db
           .update(tasks)
-          .set({
-            status: input.status as any,
-            updatedAt: new Date(),
-          })
+          .set({ status: input.status as any, updatedAt: new Date() })
           .where(eq(tasks.id, input.taskId));
         return { success: true };
       }),
   }),
 
-  // ========== Notification Routes (保留兼容性) ==========
+  // ========== Notification Routes (兼容) ==========
   notification: router({
-    // Get user notifications
     getNotifications: protectedProcedure
       .input(z.object({ limit: z.number().default(20) }))
       .query(async ({ ctx, input }) => {
         return await getUserNotifications(ctx.user.id, input.limit);
       }),
-    // Mark notification as read
     markAsRead: protectedProcedure
       .input(z.object({ notificationId: z.number() }))
       .mutation(async ({ input }) => {
@@ -469,10 +510,7 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         await db
           .update(notifications)
-          .set({
-            isRead: true,
-            readAt: new Date(),
-          })
+          .set({ isRead: true, readAt: new Date() })
           .where(eq(notifications.id, input.notificationId));
         return { success: true };
       }),

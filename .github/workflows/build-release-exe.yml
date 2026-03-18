@@ -1,0 +1,132 @@
+name: Build & Release Desktop App (EXE)
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+
+jobs:
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: |
+          cd electron-client
+          npm install
+
+      - name: Create placeholder assets
+        shell: bash
+        run: |
+          mkdir -p electron-client/assets
+          # If no icon exists, create a simple placeholder
+          if [ ! -f "electron-client/assets/icon.ico" ]; then
+            echo "Note: No icon found, electron-builder will use default"
+          fi
+
+      - name: Build Windows installer
+        run: |
+          cd electron-client
+          npm run build:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List build output
+        shell: bash
+        run: |
+          ls -lh electron-client/dist/ || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: |
+            electron-client/dist/*.exe
+            electron-client/dist/*.msi
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: UAV Dispatch Desktop ${{ github.event.inputs.release_tag || github.ref_name }}
+          body: |
+            ## 🖥️ UAV Dispatch Platform - Desktop Management Console
+
+            UAV 无人机调度平台的 **Windows 桌面管理客户端**。
+
+            ### 安装方式
+            - **安装版**: 下载 `UAV-Dispatch-Platform-Setup-*.exe` 双击安装
+            - **便携版**: 下载 `UAV-Dispatch-Platform-*.exe` 直接运行，无需安装
+
+            ### 首次使用
+            1. 双击打开应用
+            2. 点击菜单 `File → Settings`
+            3. 填入后端服务器地址（如 `http://your-server:3000`）
+            4. 点击 Save & Reload 即可进入管理界面
+
+            ### 系统要求
+            - Windows 10 / 11 (x64)
+            - 需要访问已部署的 uav-dispatch-platform 后端
+
+            Build #${{ github.run_number }} | Commit: ${{ github.sha }}
+          files: |
+            electron-client/dist/*.exe
+            electron-client/dist/*.msi
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux:
+    name: Build Linux AppImage
+    runs-on: ubuntu-latest
+    needs: build-windows
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          cd electron-client
+          npm install
+
+      - name: Build Linux AppImage
+        run: |
+          cd electron-client
+          npm run build:linux
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          files: electron-client/dist/*.AppImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

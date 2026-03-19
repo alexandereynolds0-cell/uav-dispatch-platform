@@ -26,34 +26,33 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install pnpm
-        run: npm install -g pnpm
-
       - name: Install dependencies
+        shell: bash
         run: |
           cd electron-client
           npm install
 
-      - name: Create placeholder assets
+      # Create placeholder assets dir to prevent electron-builder from failing
+      - name: Prepare assets directory
         shell: bash
         run: |
           mkdir -p electron-client/assets
-          # If no icon exists, create a simple placeholder
-          if [ ! -f "electron-client/assets/icon.ico" ]; then
-            echo "Note: No icon found, electron-builder will use default"
-          fi
 
-      - name: Build Windows installer
+      - name: Build Windows EXE
+        shell: bash
         run: |
           cd electron-client
           npm run build:win
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Disable electron-builder auto-publish to GitHub releases
+          # (we handle releases manually below)
+          EP_SKIP_NOTARIZE: "true"
 
       - name: List build output
         shell: bash
         run: |
-          ls -lh electron-client/dist/ || true
+          ls -lh electron-client/dist/ || echo "No dist/ found"
+          find electron-client/dist -name "*.exe" 2>/dev/null || echo "No exe found"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -61,7 +60,6 @@ jobs:
           name: windows-exe
           path: |
             electron-client/dist/*.exe
-            electron-client/dist/*.msi
           retention-days: 30
 
       - name: Create GitHub Release
@@ -76,57 +74,21 @@ jobs:
             UAV 无人机调度平台的 **Windows 桌面管理客户端**。
 
             ### 安装方式
-            - **安装版**: 下载 `UAV-Dispatch-Platform-Setup-*.exe` 双击安装
+            - **安装版**: 下载 `UAV-Dispatch-Platform-Setup-*.exe` 双击安装（推荐）
             - **便携版**: 下载 `UAV-Dispatch-Platform-*.exe` 直接运行，无需安装
 
             ### 首次使用
-            1. 双击打开应用
-            2. 点击菜单 `File → Settings`
-            3. 填入后端服务器地址（如 `http://your-server:3000`）
-            4. 点击 Save & Reload 即可进入管理界面
+            1. 打开应用后点击菜单 `File → Settings`
+            2. 填入后端服务器地址（如 `http://your-server:3000`）
+            3. 点击 Save & Reload 进入管理界面
 
             ### 系统要求
             - Windows 10 / 11 (x64)
             - 需要访问已部署的 uav-dispatch-platform 后端
 
             Build #${{ github.run_number }} | Commit: ${{ github.sha }}
-          files: |
-            electron-client/dist/*.exe
-            electron-client/dist/*.msi
+          files: electron-client/dist/*.exe
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-linux:
-    name: Build Linux AppImage
-    runs-on: ubuntu-latest
-    needs: build-windows
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: |
-          cd electron-client
-          npm install
-
-      - name: Build Linux AppImage
-        run: |
-          cd electron-client
-          npm run build:linux
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
-          files: electron-client/dist/*.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

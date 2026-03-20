@@ -219,5 +219,6 @@ MIT License
   3. 如果 Windows 没装 `pnpm`，直接运行 `scripts\windows\start-dev.bat` 或 `.\scripts\windows\start-dev.ps1`
   4. 如果你想一键同时拉起后端和桌面端，直接运行 `scripts\windows\start-app.bat` 或 `.\scripts\windows\start-app.ps1`
   5. 看到 `Server running on http://localhost:3000/` 后，再打开 Electron EXE；或者让总启动脚本自动打开它
+  3. 看到 `Server running on http://localhost:3000/` 后，再打开 Electron EXE
 
 现在桌面端会先访问 `GET /api/health` 检查服务是否在线；如果后端没启动，会显示内置提示页，而不是直接空白。

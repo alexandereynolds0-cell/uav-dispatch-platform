@@ -324,6 +324,66 @@ export const pilotSettlements = mysqlTable("pilotSettlements", {
 export type PilotSettlement = typeof pilotSettlements.$inferSelect;
 export type InsertPilotSettlement = typeof pilotSettlements.$inferInsert;
 
+
+/**
+ * Chat conversations
+ */
+export const conversations = mysqlTable("conversations", {
+  id: int("id").autoincrement().primaryKey(),
+  userId1: int("userId1").notNull(),
+  userId2: int("userId2").notNull(),
+  unreadCount: int("unreadCount").default(0).notNull(),
+  lastMessageAt: timestamp("lastMessageAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type Conversation = typeof conversations.$inferSelect;
+export type InsertConversation = typeof conversations.$inferInsert;
+
+/**
+ * Chat messages
+ */
+export const messages = mysqlTable("messages", {
+  id: int("id").autoincrement().primaryKey(),
+  conversationId: int("conversationId").notNull(),
+  senderId: int("senderId").notNull(),
+  receiverId: int("receiverId").notNull(),
+  content: longtext("content").notNull(),
+  filteredContent: longtext("filteredContent"),
+  messageType: mysqlEnum("messageType", ["text", "image", "system"]).default("text").notNull(),
+  isBlocked: boolean("isBlocked").default(false).notNull(),
+  blockedReason: text("blockedReason"),
+  isRead: boolean("isRead").default(false).notNull(),
+  readAt: timestamp("readAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type Message = typeof messages.$inferSelect;
+export type InsertMessage = typeof messages.$inferInsert;
+
+/**
+ * Paid contact unlock records
+ */
+export const contactUnlocks = mysqlTable("contactUnlocks", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  pilotId: int("pilotId").notNull(),
+  taskId: int("taskId"),
+  orderId: int("orderId"),
+  unlockFee: decimal("unlockFee", { precision: 10, scale: 2 }).default("9.90").notNull(),
+  status: mysqlEnum("status", ["pending", "paid", "expired", "cancelled"]).default("pending").notNull(),
+  pilotPhone: varchar("pilotPhone", { length: 20 }),
+  pilotWechat: varchar("pilotWechat", { length: 100 }),
+  paidAt: timestamp("paidAt"),
+  expiredAt: timestamp("expiredAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type ContactUnlock = typeof contactUnlocks.$inferSelect;
+export type InsertContactUnlock = typeof contactUnlocks.$inferInsert;
+
 /**
  * Notifications
  */

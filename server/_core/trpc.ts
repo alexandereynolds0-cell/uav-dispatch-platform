@@ -43,3 +43,19 @@ export const adminProcedure = t.procedure.use(
     });
   }),
 );
+
+
+export function requireRole(allowedRoles: string[]) {
+  return protectedProcedure.use(async ({ ctx, next }) => {
+    if (!ctx.user || !allowedRoles.includes(ctx.user.role)) {
+      throw new TRPCError({ code: "FORBIDDEN" });
+    }
+
+    return next({
+      ctx: {
+        ...ctx,
+        user: ctx.user,
+      },
+    });
+  });
+}

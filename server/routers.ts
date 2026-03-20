@@ -496,25 +496,6 @@ export const appRouter = router({
       }),
   }),
 
-  // ========== Notification Routes (兼容) ==========
-  notification: router({
-    getNotifications: protectedProcedure
-      .input(z.object({ limit: z.number().default(20) }))
-      .query(async ({ ctx, input }) => {
-        return await getUserNotifications(ctx.user.id, input.limit);
-      }),
-    markAsRead: protectedProcedure
-      .input(z.object({ notificationId: z.number() }))
-      .mutation(async ({ input }) => {
-        const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db
-          .update(notifications)
-          .set({ isRead: true, readAt: new Date() })
-          .where(eq(notifications.id, input.notificationId));
-        return { success: true };
-      }),
-  }),
 });
 
 export type AppRouter = typeof appRouter;

@@ -50,11 +50,72 @@ cd uav-dispatch-platform
 # 安装 Node.js (如果没有)
 # 推荐使用 nvm: https://github.com/nvm-sh/nvm
 
-# 安装 pnpm
-npm install -g pnpm
-
-# 安装项目依赖
+# 方案 A：已安装 pnpm
 pnpm install
+
+# 方案 B：Windows / 新机器没装 pnpm
+corepack enable
+corepack prepare pnpm@10.4.1 --activate
+pnpm install
+```
+
+### Windows 一键启动（推荐）
+
+如果你在 PowerShell 里遇到 `pnpm` 找不到，可以直接运行仓库自带脚本：
+
+```powershell
+.\scripts\windows\start-dev.ps1
+```
+
+或者双击：
+
+```bat
+scripts\windows\start-dev.bat
+```
+
+这个脚本会按顺序自动尝试：
+1. 直接使用已安装的 `pnpm`
+2. 用 `corepack` 自动启用 `pnpm`
+3. 再不行就用 `npx pnpm` 临时执行
+
+### Windows 总启动脚本（后端 + Electron）
+
+如果你想“一次启动后端并自动打开桌面端”，请使用：
+
+```powershell
+.\scripts\windows\start-app.ps1
+```
+
+或者直接双击：
+
+```bat
+scripts\windows\start-app.bat
+```
+
+如果你还想顺便自动打开浏览器管理页，再双击这个：
+
+```bat
+scripts\windows\start-app-browser.bat
+```
+
+行为如下：
+- 先启动后端开发服务器
+- 自动轮询 `http://127.0.0.1:3000/api/health`
+- 自动把默认后端地址写入 Electron 配置文件
+- 如果仓库里已经有新编译出来的 `.exe`，优先打开该 `.exe`
+- 如果还没有 `.exe`，就自动启动 `electron-client` 的开发版 Electron
+- 可选同时打开浏览器管理页
+
+如果你已经安装好了某个特定 EXE，也可以手动指定路径：
+
+```powershell
+.\scripts\windows\start-app.ps1 -ElectronExePath "C:\path\to\UAV-Dispatch-Platform.exe"
+```
+
+如果你想从 PowerShell 里显式打开浏览器，也可以：
+
+```powershell
+.\scripts\windows\start-app.ps1 -OpenBrowser
 ```
 
 ### 3. 配置环境变量
@@ -158,3 +219,20 @@ MIT License
 
 **开发日期**: 2026年3月
 **版本**: 1.1.0
+
+
+## 🖥️ Electron 桌面端说明
+
+`electron-client` 里的 EXE 只是**桌面壳**，它需要连接一个正在运行的后端/Web 服务。
+
+- `Backend Server URL` 指的是 **你自己的 UAV Dispatch Platform 服务地址**，不是第三方平台地址。
+- 如果你在本机运行本仓库，默认填写 `http://127.0.0.1:3000` 即可。
+- 正确启动顺序：
+  1. 在项目根目录执行 `pnpm install`
+  2. 执行 `pnpm dev`
+  3. 如果 Windows 没装 `pnpm`，直接运行 `scripts\windows\start-dev.bat` 或 `.\scripts\windows\start-dev.ps1`
+  4. 如果你想一键同时拉起后端和桌面端，直接运行 `scripts\windows\start-app.bat` 或 `.\scripts\windows\start-app.ps1`
+  5. 如果还想同时打开浏览器管理页，运行 `scripts\windows\start-app-browser.bat` 或在 PowerShell 里加 `-OpenBrowser`
+  6. 总启动脚本会自动写入默认后端地址，并自动打开 Electron EXE；如果没找到 EXE，就改为启动仓库里的 Electron 开发版
+
+现在桌面端会先访问 `GET /api/health` 检查服务是否在线；如果后端没启动，会显示内置提示页，而不是直接空白。

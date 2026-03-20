@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { router, protectedProcedure, publicProcedure } from "../trpc";
+import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { db } from "../db";
 import { systemConfig, orders, tasks, users, pilotProfiles } from "../../drizzle/schema";

@@ -35,6 +35,18 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   // OAuth callback under /api/oauth/callback
   registerOAuthRoutes(app);
+
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      ok: true,
+      message: "UAV Dispatch backend is running",
+      environment: process.env.NODE_ENV || "development",
+      port: process.env.PORT || "3000",
+      hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
+      hasStripeKey: Boolean(process.env.STRIPE_SECRET_KEY),
+    });
+  });
+
   // tRPC API
   app.use(
     "/api/trpc",

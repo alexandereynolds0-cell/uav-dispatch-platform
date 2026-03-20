@@ -86,22 +86,36 @@ scripts\windows\start-dev.bat
 .\scripts\windows\start-app.ps1
 ```
 
-或者：
+或者直接双击：
 
 ```bat
 scripts\windows\start-app.bat
 ```
 
+如果你还想顺便自动打开浏览器管理页，再双击这个：
+
+```bat
+scripts\windows\start-app-browser.bat
+```
+
 行为如下：
 - 先启动后端开发服务器
 - 自动轮询 `http://127.0.0.1:3000/api/health`
+- 自动把默认后端地址写入 Electron 配置文件
 - 如果仓库里已经有新编译出来的 `.exe`，优先打开该 `.exe`
 - 如果还没有 `.exe`，就自动启动 `electron-client` 的开发版 Electron
+- 可选同时打开浏览器管理页
 
 如果你已经安装好了某个特定 EXE，也可以手动指定路径：
 
 ```powershell
 .\scripts\windows\start-app.ps1 -ElectronExePath "C:\path\to\UAV-Dispatch-Platform.exe"
+```
+
+如果你想从 PowerShell 里显式打开浏览器，也可以：
+
+```powershell
+.\scripts\windows\start-app.ps1 -OpenBrowser
 ```
 
 ### 3. 配置环境变量
@@ -218,7 +232,7 @@ MIT License
   2. 执行 `pnpm dev`
   3. 如果 Windows 没装 `pnpm`，直接运行 `scripts\windows\start-dev.bat` 或 `.\scripts\windows\start-dev.ps1`
   4. 如果你想一键同时拉起后端和桌面端，直接运行 `scripts\windows\start-app.bat` 或 `.\scripts\windows\start-app.ps1`
-  5. 看到 `Server running on http://localhost:3000/` 后，再打开 Electron EXE；或者让总启动脚本自动打开它
-  3. 看到 `Server running on http://localhost:3000/` 后，再打开 Electron EXE
+  5. 如果还想同时打开浏览器管理页，运行 `scripts\windows\start-app-browser.bat` 或在 PowerShell 里加 `-OpenBrowser`
+  6. 总启动脚本会自动写入默认后端地址，并自动打开 Electron EXE；如果没找到 EXE，就改为启动仓库里的 Electron 开发版
 
 现在桌面端会先访问 `GET /api/health` 检查服务是否在线；如果后端没启动，会显示内置提示页，而不是直接空白。

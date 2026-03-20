@@ -1,7 +1,8 @@
 param(
   [string]$ServerUrl = 'http://127.0.0.1:3000',
   [string]$ElectronExePath = '',
-  [int]$WaitSeconds = 60
+  [int]$WaitSeconds = 60,
+  [switch]$OpenBrowser
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,6 +14,45 @@ function Write-Step($message) {
 function Fail($message) {
   Write-Host "[UAV] $message" -ForegroundColor Red
   exit 1
+}
+
+
+function Normalize-ServerUrl {
+  param([string]$Url)
+
+  $value = $Url.Trim()
+  if (-not $value) {
+    return 'http://127.0.0.1:3000'
+  }
+
+  if ($value -notmatch '^https?://') {
+    $value = "http://$value"
+  }
+
+  return $value.TrimEnd('/')
+}
+
+function Write-ElectronConfig {
+  param(
+    [string]$NormalizedServerUrl
+  )
+
+  $appData = [Environment]::GetFolderPath('ApplicationData')
+  $configDir = Join-Path $appData 'uav-dispatch-desktop'
+  $configPath = Join-Path $configDir 'config.json'
+
+  if (-not (Test-Path $configDir)) {
+    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+  }
+
+  $config = [ordered]@{
+    serverUrl = $NormalizedServerUrl
+    windowWidth = 1280
+    windowHeight = 800
+  }
+
+  $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
+  Write-Step "已写入 Electron 默认配置：$configPath"
 }
 
 function Get-PackageManagerCommand {
@@ -93,6 +133,8 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   Fail '未检测到 Node.js。请先安装 Node.js 20+： https://nodejs.org/'
 }
 
+$ServerUrl = Normalize-ServerUrl $ServerUrl
+
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 Set-Location $RepoRoot
 
@@ -114,6 +156,12 @@ if (-not (Wait-ForServer -HealthUrl $healthUrl -TimeoutSeconds $WaitSeconds)) {
 }
 
 Write-Step '后端已就绪。'
+Write-ElectronConfig -NormalizedServerUrl $ServerUrl
+
+if ($OpenBrowser) {
+  Write-Step "正在打开浏览器管理页：$ServerUrl"
+  Start-Process $ServerUrl
+}
 
 $resolvedExe = $null
 if ($ElectronExePath) {

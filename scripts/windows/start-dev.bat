@@ -17,8 +17,8 @@ if not errorlevel 1 (
   where corepack >nul 2>nul
   if not errorlevel 1 (
     echo [UAV] pnpm not found. Enabling pnpm via corepack...
-    call corepack enable || goto :fail
-    call corepack prepare pnpm@10.4.1 --activate || goto :fail
+    call corepack enable || exit /b 1
+    call corepack prepare pnpm@10.4.1 --activate || exit /b 1
     where pnpm >nul 2>nul
     if not errorlevel 1 (
       set "PNPM_CMD=pnpm"
@@ -39,13 +39,7 @@ if not errorlevel 1 (
 
 echo [UAV] Using command: %PNPM_CMD%
 echo [UAV] Installing dependencies...
-call %PNPM_CMD% install || goto :fail
+call %PNPM_CMD% install || exit /b 1
 
 echo [UAV] Starting development server...
-call %PNPM_CMD% dev || goto :fail
-
-:fail
-echo.
-echo [UAV] Startup failed. Press any key to close this window.
-pause >nul
-exit /b 1
+call %PNPM_CMD% dev || exit /b 1

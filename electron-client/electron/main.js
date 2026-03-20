@@ -1,17 +1,19 @@
 /**
  * UAV Dispatch Platform - Electron Desktop Client
- * 
- * This Electron app wraps the UAV Dispatch Platform web interface
- * as a native Windows desktop application for easy management.
+ *
+ * Desktop shell for the UAV Dispatch Platform web management console.
+ * It now performs connection checks and shows a built-in setup screen
+ * instead of redirecting to a blank page when the backend server is unavailable.
  */
 
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain, Tray, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-// ── App configuration ────────────────────────────────────────────────────────
-
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
+const DEFAULT_SERVER_URL = 'http://127.0.0.1:3000';
+const HEALTH_ENDPOINT = '/api/health';
+const SERVER_CHECK_TIMEOUT_MS = 4000;
 
 function loadConfig() {
   try {
@@ -22,7 +24,7 @@ function loadConfig() {
     console.error('Failed to load config:', e);
   }
   return {
-    serverUrl: 'http://localhost:3000',
+    serverUrl: DEFAULT_SERVER_URL,
     windowWidth: 1280,
     windowHeight: 800,
   };
@@ -36,31 +38,85 @@ function saveConfig(config) {
   }
 }
 
+function normalizeServerUrl(value) {
+  const input = String(value || '').trim();
+  if (!input) return DEFAULT_SERVER_URL;
+  const withProtocol = /^https?:\/\//i.test(input) ? input : `http://${input}`;
+
+  try {
+    const parsed = new URL(withProtocol);
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return DEFAULT_SERVER_URL;
+  }
+}
+
+async function checkServer(serverUrl) {
+  const url = `${normalizeServerUrl(serverUrl)}${HEALTH_ENDPOINT}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SERVER_CHECK_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        message: `服务器返回 ${response.status} ${response.statusText}`,
+      };
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    return {
+      ok: true,
+      message: payload.message || 'Backend server is online.',
+      payload,
+    };
+  } catch (error) {
+    clearTimeout(timeout);
+    const message = error?.name === 'AbortError'
+      ? `连接超时（>${SERVER_CHECK_TIMEOUT_MS / 1000} 秒）`
+      : error?.message || '无法连接到服务器';
+
+    return {
+      ok: false,
+      message,
+    };
+  }
+}
+
 let config = loadConfig();
+config.serverUrl = normalizeServerUrl(config.serverUrl);
 let mainWindow = null;
 let tray = null;
-
-// ── Window creation ──────────────────────────────────────────────────────────
 
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: config.windowWidth || 1280,
     height: config.windowHeight || 800,
-    minWidth: 900,
-    minHeight: 600,
+    minWidth: 960,
+    minHeight: 680,
     title: 'UAV Dispatch Platform - Management Console',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      webSecurity: false, // Allow loading from configured server
+      webSecurity: false,
     },
-    show: false, // Don't show until ready
-    backgroundColor: '#1a1a2e',
+    show: false,
+    backgroundColor: '#0f172a',
   });
 
-  // Save window size on resize
   mainWindow.on('resize', () => {
     const [w, h] = mainWindow.getSize();
     config.windowWidth = w;
@@ -68,22 +124,18 @@ function createWindow() {
     saveConfig(config);
   });
 
-  // Show window when ready
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     mainWindow.focus();
   });
 
-  // Handle external links
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  // Load the platform
   loadPlatform();
 
-  // Handle close to tray
   mainWindow.on('close', (event) => {
     if (!app.isQuiting) {
       event.preventDefault();
@@ -94,60 +146,241 @@ function createWindow() {
   return mainWindow;
 }
 
-function loadPlatform() {
-  const serverUrl = config.serverUrl || 'http://localhost:3000';
-  
-  // Show loading page first
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-          background: #1a1a2e;
-          color: #eee;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          height: 100vh;
-          gap: 20px;
-        }
-        .logo { font-size: 48px; }
-        h1 { font-size: 24px; font-weight: 300; }
-        .subtitle { color: #888; font-size: 14px; }
-        .spinner {
-          width: 40px; height: 40px;
-          border: 3px solid #333;
-          border-top-color: #4fc3f7;
-          border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .url { color: #4fc3f7; font-size: 13px; margin-top: 8px; }
-      </style>
-    </head>
-    <body>
-      <div class="logo">🚁</div>
-      <h1>UAV Dispatch Platform</h1>
-      <div class="subtitle">Connecting to management console...</div>
-      <div class="spinner"></div>
-      <div class="url">${serverUrl}</div>
+function renderStatusPage({ serverUrl, status, detail }) {
+  const safeUrl = normalizeServerUrl(serverUrl);
+  const title = status === 'checking'
+    ? '正在连接后端服务…'
+    : status === 'error'
+      ? '未连接到后端服务'
+      : '后端服务已连接';
+  const subtitle = status === 'checking'
+    ? '桌面端正在检查管理后台是否可访问。'
+    : status === 'error'
+      ? '请先启动后端，再返回桌面端刷新。未启动后端时，Electron 包装壳会显示空白或无法加载页面。'
+      : '后端可用，正在打开管理控制台。';
+  const color = status === 'error' ? '#f97316' : '#38bdf8';
+  const badgeText = status === 'error' ? '未连接' : status === 'checking' ? '检查中' : '已连接';
+
+  return `<!DOCTYPE html>
+  <html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data:;" />
+    <title>UAV Dispatch Platform</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #020617;
+        --panel: rgba(15, 23, 42, 0.92);
+        --panel-border: rgba(148, 163, 184, 0.18);
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: ${color};
+        --accent-soft: rgba(56, 189, 248, 0.14);
+        --danger-soft: rgba(249, 115, 22, 0.14);
+        --success: #10b981;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background:
+          radial-gradient(circle at top, rgba(56, 189, 248, 0.12), transparent 30%),
+          linear-gradient(180deg, #0f172a 0%, var(--bg) 100%);
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px;
+      }
+      .shell {
+        width: min(1040px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        border-radius: 24px;
+        box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+        overflow: hidden;
+      }
+      .hero {
+        padding: 32px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+        display: flex;
+        gap: 24px;
+        align-items: flex-start;
+        justify-content: space-between;
+      }
+      .hero-left { max-width: 680px; }
+      .logo { font-size: 48px; margin-bottom: 16px; }
+      h1 { margin: 0 0 12px; font-size: 32px; line-height: 1.2; }
+      .subtitle { color: var(--muted); font-size: 16px; line-height: 1.7; }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: ${status === 'error' ? 'var(--danger-soft)' : 'var(--accent-soft)'};
+        border: 1px solid rgba(255,255,255,0.08);
+        font-size: 13px;
+      }
+      .grid {
+        padding: 32px;
+        display: grid;
+        grid-template-columns: 1.15fr 0.85fr;
+        gap: 24px;
+      }
+      .card {
+        background: rgba(15, 23, 42, 0.7);
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        border-radius: 18px;
+        padding: 24px;
+      }
+      .card h2 { margin: 0 0 16px; font-size: 20px; }
+      .server {
+        margin: 16px 0;
+        padding: 14px 16px;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.95);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        word-break: break-all;
+      }
+      .detail {
+        margin-top: 12px;
+        color: ${status === 'error' ? '#fdba74' : '#7dd3fc'};
+        font-size: 14px;
+      }
+      ol, ul { margin: 0; padding-left: 20px; color: var(--muted); line-height: 1.8; }
+      .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
+      button {
+        border: none;
+        border-radius: 12px;
+        padding: 12px 16px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .primary { background: var(--accent); color: #082f49; }
+      .secondary { background: rgba(30, 41, 59, 0.92); color: var(--text); border: 1px solid rgba(148, 163, 184, 0.24); }
+      .ghost { background: transparent; color: #cbd5e1; border: 1px dashed rgba(148, 163, 184, 0.24); }
+      .tip {
+        margin-top: 16px;
+        padding: 14px 16px;
+        border-radius: 12px;
+        border: 1px solid rgba(16, 185, 129, 0.2);
+        background: rgba(16, 185, 129, 0.08);
+        color: #a7f3d0;
+        font-size: 14px;
+        line-height: 1.7;
+      }
+      .footer {
+        padding: 0 32px 32px;
+        color: #64748b;
+        font-size: 12px;
+      }
+      code {
+        background: rgba(15, 23, 42, 0.9);
+        border-radius: 8px;
+        padding: 2px 6px;
+        color: #e2e8f0;
+      }
+      @media (max-width: 900px) {
+        .hero, .grid { grid-template-columns: 1fr; display: block; }
+        .grid > * + * { margin-top: 24px; }
+        .hero { display: block; }
+        .badge { margin-top: 16px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="hero">
+        <div class="hero-left">
+          <div class="logo">🚁</div>
+          <h1>${title}</h1>
+          <div class="subtitle">${subtitle}</div>
+        </div>
+        <div class="badge">● ${badgeText}</div>
+      </div>
+      <div class="grid">
+        <section class="card">
+          <h2>当前后端地址</h2>
+          <div class="server">${safeUrl}</div>
+          <div class="detail">${detail || ''}</div>
+          <div class="actions">
+            <button class="primary" onclick="window.electronAPI.reloadPlatform()">重新检查并打开</button>
+            <button class="secondary" onclick="window.electronAPI.openSettings()">修改服务器地址</button>
+            <button class="ghost" onclick="window.electronAPI.openExternal(serverInput.value || '${safeUrl}')">在浏览器打开</button>
+          </div>
+          <div class="tip">
+            <strong>说明：</strong> “Backend Server URL” 不是第三方地址，而是你自己的 UAV Dispatch 平台后端服务地址。<br />
+            如果你在本机启动本仓库，通常就是 <code>http://127.0.0.1:3000</code> 或 <code>http://localhost:3000</code>。
+          </div>
+        </section>
+        <section class="card">
+          <h2>如何启动服务器</h2>
+          <ol>
+            <li>安装 Node.js 20+ 与 pnpm。</li>
+            <li>在项目根目录执行：<code>pnpm install</code>。</li>
+            <li>创建环境变量文件后执行：<code>pnpm dev</code>。</li>
+            <li>看到 <code>Server running on http://localhost:3000/</code> 后，再打开桌面端。</li>
+          </ol>
+          <div class="tip" style="margin-top: 18px;">
+            <strong>现在可先不填 API Key / Secret：</strong> 地图、支付等高级功能缺失时会受限，但管理后台与基础页面应该能启动，不应再直接空白。
+          </div>
+          <h2 style="margin-top: 24px;">快速排查</h2>
+          <ul>
+            <li>如果 3000 端口被占用，服务会自动切到 3001~3019 之间的空闲端口。</li>
+            <li>如果你改了端口，请把桌面端里的地址改成实际端口。</li>
+            <li>如果浏览器也打不开该地址，说明不是 Electron 问题，而是后端尚未启动。</li>
+          </ul>
+          <input id="serverInput" value="${safeUrl}" style="margin-top:16px;width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(148,163,184,.22);background:#020617;color:#e2e8f0;" />
+        </section>
+      </div>
+      <div class="footer">UAV Dispatch Platform Desktop · 内置连接检测与启动说明页</div>
       <script>
-        setTimeout(() => { window.location = '${serverUrl}'; }, 1500);
+        const serverInput = document.getElementById('serverInput');
       </script>
-    </body>
-    </html>
-  `)}`);
+    </div>
+  </body>
+  </html>`;
 }
 
-// ── System Tray ──────────────────────────────────────────────────────────────
+async function loadPlatform() {
+  const serverUrl = normalizeServerUrl(config.serverUrl);
+  config.serverUrl = serverUrl;
+  saveConfig(config);
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderStatusPage({
+    serverUrl,
+    status: 'checking',
+    detail: '正在检查 ' + serverUrl + HEALTH_ENDPOINT,
+  }))}`);
+
+  const status = await checkServer(serverUrl);
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  if (status.ok) {
+    await mainWindow.loadURL(serverUrl);
+    return;
+  }
+
+  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderStatusPage({
+    serverUrl,
+    status: 'error',
+    detail: status.message,
+  }))}`);
+}
 
 function createTray() {
-  // Use a simple icon (fallback to app icon)
   let trayIcon;
   const iconPath = path.join(__dirname, 'assets', 'tray-icon.png');
   if (fs.existsSync(iconPath)) {
@@ -155,10 +388,10 @@ function createTray() {
   } else {
     trayIcon = nativeImage.createEmpty();
   }
-  
+
   tray = new Tray(trayIcon);
   tray.setToolTip('UAV Dispatch Platform');
-  
+
   const contextMenu = Menu.buildFromTemplate([
     {
       label: 'Open Management Console',
@@ -175,17 +408,15 @@ function createTray() {
       click: () => { app.isQuiting = true; app.quit(); }
     },
   ]);
-  
+
   tray.setContextMenu(contextMenu);
   tray.on('click', () => { mainWindow.show(); mainWindow.focus(); });
 }
 
-// ── Settings Dialog ──────────────────────────────────────────────────────────
-
 function showSettings() {
   const settingsWin = new BrowserWindow({
-    width: 480,
-    height: 340,
+    width: 520,
+    height: 420,
     parent: mainWindow,
     modal: true,
     resizable: false,
@@ -199,50 +430,69 @@ function showSettings() {
 
   settingsWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
     <!DOCTYPE html>
-    <html>
+    <html lang="zh-CN">
     <head>
       <meta charset="UTF-8">
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          background: #f5f5f5;
+          font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          background: #f8fafc;
           padding: 24px;
-          color: #333;
+          color: #0f172a;
         }
-        h2 { margin-bottom: 20px; color: #1a1a2e; }
-        label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
+        h2 { margin-bottom: 20px; color: #0f172a; }
+        label { display: block; font-size: 13px; color: #475569; margin-bottom: 6px; }
         input {
-          width: 100%; padding: 8px 12px;
-          border: 1px solid #ddd; border-radius: 6px;
-          font-size: 14px; margin-bottom: 16px;
+          width: 100%; padding: 12px 14px;
+          border: 1px solid #cbd5e1; border-radius: 10px;
+          font-size: 14px; margin-bottom: 12px;
           outline: none;
         }
-        input:focus { border-color: #4fc3f7; }
-        .hint { font-size: 12px; color: #999; margin-top: -12px; margin-bottom: 16px; }
-        .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
-        button {
-          padding: 8px 20px; border: none; border-radius: 6px;
-          cursor: pointer; font-size: 14px;
+        input:focus { border-color: #38bdf8; }
+        .hint { font-size: 12px; color: #64748b; margin-bottom: 16px; line-height: 1.6; }
+        .panel {
+          background: white;
+          border: 1px solid #e2e8f0;
+          border-radius: 14px;
+          padding: 16px;
+          margin-bottom: 16px;
         }
-        .primary { background: #1a1a2e; color: white; }
-        .secondary { background: #e0e0e0; color: #333; }
-        button:hover { opacity: 0.85; }
+        .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 12px; }
+        button {
+          padding: 10px 20px; border: none; border-radius: 10px;
+          cursor: pointer; font-size: 14px; font-weight: 600;
+        }
+        .primary { background: #0f172a; color: white; }
+        .secondary { background: #e2e8f0; color: #334155; }
+        button:hover { opacity: 0.88; }
+        code { background: #e2e8f0; padding: 2px 6px; border-radius: 6px; }
       </style>
     </head>
     <body>
-      <h2>⚙️ Settings</h2>
-      <label>Backend Server URL</label>
-      <input type="url" id="serverUrl" value="${config.serverUrl}" placeholder="http://your-server:3000" />
-      <p class="hint">The URL where uav-dispatch-platform is running</p>
+      <h2>⚙️ 连接设置</h2>
+      <div class="panel">
+        <label>Backend Server URL</label>
+        <input type="text" id="serverUrl" value="${config.serverUrl}" placeholder="http://127.0.0.1:3000" />
+        <p class="hint">这里填写你自己的 UAV Dispatch 后端服务地址。<br>本机启动本仓库时，通常填 <code>http://127.0.0.1:3000</code>。</p>
+      </div>
+      <div class="panel">
+        <p class="hint">
+          <strong>启动命令：</strong><br>
+          1. 进入项目根目录<br>
+          2. 执行 <code>pnpm install</code><br>
+          3. 执行 <code>pnpm dev</code><br>
+          4. 服务启动后再回到桌面端点击保存
+        </p>
+      </div>
       <div class="btns">
-        <button class="secondary" onclick="window.close()">Cancel</button>
-        <button class="primary" onclick="save()">Save & Reload</button>
+        <button class="secondary" onclick="window.close()">取消</button>
+        <button class="primary" onclick="save()">保存并重试连接</button>
       </div>
       <script>
         function save() {
           const url = document.getElementById('serverUrl').value.trim();
-          if (!url) { alert('Please enter a valid URL'); return; }
+          if (!url) { alert('请输入后端地址'); return; }
           window.electronAPI.saveConfig({ serverUrl: url });
           window.close();
         }
@@ -254,21 +504,27 @@ function showSettings() {
   settingsWin.setMenu(null);
 }
 
-// ── IPC Handlers ─────────────────────────────────────────────────────────────
-
 ipcMain.handle('get-config', () => config);
-
-ipcMain.handle('save-config', (event, newConfig) => {
-  config = { ...config, ...newConfig };
+ipcMain.handle('save-config', async (_event, newConfig) => {
+  config = { ...config, ...newConfig, serverUrl: normalizeServerUrl(newConfig?.serverUrl || config.serverUrl) };
   saveConfig(config);
-  // Reload main window with new URL
   if (mainWindow) {
-    loadPlatform();
+    await loadPlatform();
   }
   return config;
 });
-
-// ── Application Menu ─────────────────────────────────────────────────────────
+ipcMain.handle('reload-platform', async () => {
+  await loadPlatform();
+  return true;
+});
+ipcMain.handle('open-settings', () => {
+  showSettings();
+  return true;
+});
+ipcMain.handle('open-external', (_event, url) => {
+  shell.openExternal(normalizeServerUrl(url));
+  return true;
+});
 
 function buildMenu() {
   const template = [
@@ -279,6 +535,11 @@ function buildMenu() {
           label: 'Settings...',
           accelerator: 'CmdOrCtrl+,',
           click: showSettings,
+        },
+        {
+          label: 'Reconnect',
+          accelerator: 'CmdOrCtrl+R',
+          click: () => loadPlatform(),
         },
         { type: 'separator' },
         { role: 'quit' },
@@ -307,14 +568,14 @@ function buildMenu() {
       submenu: [
         {
           label: 'Dashboard',
-          click: () => mainWindow.loadURL(config.serverUrl),
+          click: () => loadPlatform(),
         },
         {
           label: 'Admin Panel',
           click: () => mainWindow.loadURL(`${config.serverUrl}/admin`),
         },
         {
-          label: 'Settings',
+          label: 'Settings Page',
           click: () => mainWindow.loadURL(`${config.serverUrl}/settings`),
         },
         { type: 'separator' },
@@ -326,6 +587,10 @@ function buildMenu() {
       label: 'Help',
       submenu: [
         {
+          label: 'Open Backend URL in Browser',
+          click: () => shell.openExternal(config.serverUrl),
+        },
+        {
           label: 'GitHub Repository',
           click: () => shell.openExternal('https://github.com/alexandereynolds0-cell/uav-dispatch-platform'),
         },
@@ -334,7 +599,7 @@ function buildMenu() {
           click: () => dialog.showMessageBox(mainWindow, {
             title: 'About',
             message: 'UAV Dispatch Platform\nDesktop Management Console',
-            detail: 'Version 1.0.0\nBuilt with Electron',
+            detail: 'Version 1.1.0\nImproved with backend connectivity diagnostics',
             icon: path.join(__dirname, 'assets', 'icon.png'),
           }),
         },
@@ -344,8 +609,6 @@ function buildMenu() {
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
-
-// ── App Lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
   createWindow();

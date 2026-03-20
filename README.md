@@ -158,3 +158,17 @@ MIT License
 
 **开发日期**: 2026年3月
 **版本**: 1.1.0
+
+
+## 🖥️ Electron 桌面端说明
+
+`electron-client` 里的 EXE 只是**桌面壳**，它需要连接一个正在运行的后端/Web 服务。
+
+- `Backend Server URL` 指的是 **你自己的 UAV Dispatch Platform 服务地址**，不是第三方平台地址。
+- 如果你在本机运行本仓库，默认填写 `http://127.0.0.1:3000` 即可。
+- 正确启动顺序：
+  1. 在项目根目录执行 `pnpm install`
+  2. 执行 `pnpm dev`
+  3. 看到 `Server running on http://localhost:3000/` 后，再打开 Electron EXE
+
+现在桌面端会先访问 `GET /api/health` 检查服务是否在线；如果后端没启动，会显示内置提示页，而不是直接空白。

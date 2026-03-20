@@ -186,7 +186,7 @@ Write-Step '正在安装 electron-client 依赖...'
 Invoke-PackageManager -PackageManager $PackageManager -Arguments '--dir electron-client install'
 
 Write-Step '正在启动 Electron 开发版（新窗口）...'
-$command = "Set-Location '$RepoRoot'; Invoke-Expression '$($PackageManager) --dir electron-client start'"
+$command = "Set-Location '$RepoRoot'; $PackageManager --dir electron-client start"
 Start-Process powershell -ArgumentList @(
   '-NoExit',
   '-ExecutionPolicy', 'Bypass',

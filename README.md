@@ -50,11 +50,58 @@ cd uav-dispatch-platform
 # 安装 Node.js (如果没有)
 # 推荐使用 nvm: https://github.com/nvm-sh/nvm
 
-# 安装 pnpm
-npm install -g pnpm
-
-# 安装项目依赖
+# 方案 A：已安装 pnpm
 pnpm install
+
+# 方案 B：Windows / 新机器没装 pnpm
+corepack enable
+corepack prepare pnpm@10.4.1 --activate
+pnpm install
+```
+
+### Windows 一键启动（推荐）
+
+如果你在 PowerShell 里遇到 `pnpm` 找不到，可以直接运行仓库自带脚本：
+
+```powershell
+.\scripts\windows\start-dev.ps1
+```
+
+或者双击：
+
+```bat
+scripts\windows\start-dev.bat
+```
+
+这个脚本会按顺序自动尝试：
+1. 直接使用已安装的 `pnpm`
+2. 用 `corepack` 自动启用 `pnpm`
+3. 再不行就用 `npx pnpm` 临时执行
+
+### Windows 总启动脚本（后端 + Electron）
+
+如果你想“一次启动后端并自动打开桌面端”，请使用：
+
+```powershell
+.\scripts\windows\start-app.ps1
+```
+
+或者：
+
+```bat
+scripts\windows\start-app.bat
+```
+
+行为如下：
+- 先启动后端开发服务器
+- 自动轮询 `http://127.0.0.1:3000/api/health`
+- 如果仓库里已经有新编译出来的 `.exe`，优先打开该 `.exe`
+- 如果还没有 `.exe`，就自动启动 `electron-client` 的开发版 Electron
+
+如果你已经安装好了某个特定 EXE，也可以手动指定路径：
+
+```powershell
+.\scripts\windows\start-app.ps1 -ElectronExePath "C:\path\to\UAV-Dispatch-Platform.exe"
 ```
 
 ### 3. 配置环境变量
@@ -169,6 +216,9 @@ MIT License
 - 正确启动顺序：
   1. 在项目根目录执行 `pnpm install`
   2. 执行 `pnpm dev`
+  3. 如果 Windows 没装 `pnpm`，直接运行 `scripts\windows\start-dev.bat` 或 `.\scripts\windows\start-dev.ps1`
+  4. 如果你想一键同时拉起后端和桌面端，直接运行 `scripts\windows\start-app.bat` 或 `.\scripts\windows\start-app.ps1`
+  5. 看到 `Server running on http://localhost:3000/` 后，再打开 Electron EXE；或者让总启动脚本自动打开它
   3. 看到 `Server running on http://localhost:3000/` 后，再打开 Electron EXE
 
 现在桌面端会先访问 `GET /api/health` 检查服务是否在线；如果后端没启动，会显示内置提示页，而不是直接空白。
